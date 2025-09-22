@@ -9,6 +9,14 @@ import torch
 import torch.nn as nn
 from generate_heatmap import GradCAM, heatmap
 
+# CHANGED: prefer local modules over any similarly named installed packages
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# CHANGED: silence PyTorch’s future-warning from backward hooks
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 class ModelBaseline(nn.Module):
     def __init__(self ,):
         super(ModelBaseline, self).__init__()
@@ -79,14 +87,14 @@ if __name__ == '__main__':
     cols = 1
 
     ecg, sample_rate, leads = read_ecg.read_ecg(args.path_to_ecg, format=args.fmt)
+
+    # CHANGED: remove unsupported 'powerline' kwarg
     ecg, sample_rate, leads = preprocess.preprocess_ecg(ecg, sample_rate, leads,
                                                         new_freq=400,
                                                         new_len=4096,
                                                         scale=args.scale,
-                                                        powerline=60,
                                                         use_all_leads=False,
                                                         remove_baseline=True)
-
 
     model = ModelBaseline()
     ckpt = torch.load(args.path_to_model, map_location=lambda storage, loc: storage)
@@ -102,29 +110,36 @@ if __name__ == '__main__':
     grad_cam_model = GradCAM(model)
     _ = grad_cam_model(x)  # not using the result, but need it for initialisation
 
-    x_viz = grad_cam_model.generate('conv1')
+    # CHANGED: use deeper layer + normalize/broadcast CAM so it’s clearly visible
+    x_viz = grad_cam_model.generate('conv3')
     x_viz = x_viz.detach().cpu().data.numpy()
+    if x_viz.ndim == 3:
+        x_viz = x_viz.squeeze(0)
+    if x_viz.shape[0] != ecg.shape[0]:
+        x_viz = np.tile(x_viz.mean(axis=0, keepdims=True), (ecg.shape[0], 1))
+    x_viz = np.maximum(x_viz, 0)
+    x_viz = (x_viz - x_viz.min(axis=1, keepdims=True)) / (x_viz.max(axis=1, keepdims=True) - x_viz.min(axis=1, keepdims=True) + 1e-8)
 
     ecg_plot.plot(ecg, sample_rate=sample_rate,
                   lead_index=leads, style='bw',
                   row_height=row_height, columns=cols)
-    heatmap(ecg, x_viz, sample_rate=sample_rate, columns=cols, scale=2, row_height=row_height)
+    # CHANGED: stronger overlay scale so you can see it
+    heatmap(ecg, x_viz, sample_rate=sample_rate, columns=cols, scale=10, row_height=row_height)
+
     # rm ticks
     plt.tick_params(
-        axis='both',  # changes apply to the x-axis
-        which='both',  # both major and minor ticks are affected
-        bottom=False,  # ticks along the bottom edge are off
-        top=False,  # ticks along the top edge are off
+        axis='both',
+        which='both',
+        bottom=False,
+        top=False,
         left=False,
         right=False,
         labelleft=False,
-        labelbottom=False)  # labels along the bottom edge are off
+        labelbottom=False)
 
+    # CHANGED: save the current Matplotlib figure so the overlay is included
     if args.save:
-        path, ext = os.path.splitext(args.save)
-        if ext == '.png':
-            ecg_plot.save_as_png(path)
-        elif ext == '.pdf':
-            ecg_plot.save_as_pdf(path)
+        os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
+        plt.savefig(args.save, dpi=300, bbox_inches="tight")
     else:
-        ecg_plot.show()
+        plt.show()
